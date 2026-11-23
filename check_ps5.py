@@ -7,9 +7,9 @@ PRODUCTS = [
     {"name": "PS5 Disc (Certified Refurbished)",
      "url": "https://www.playstation.com/nl-nl/ps5/certified-refurbished/product/PSD001-PSDE01840_63-PS5GRADEDCEC7XZE/"},
 ]
-TOPIC = os.environ["NTFY_TOPIC"]
+TOPIC = os.environ["NTFY_TOPIC"].strip().replace("https://", "").replace("ntfy.sh/", "").strip("/")
 STATE_FILE = "state.json"
-ADD_RE = re.compile(r"toevoegen aan (winkel)?(wagen|mandje)|in (de )?winkelwagen|add to (cart|basket)|nu kopen|buy now", re.I)
+ADD_RE = re.compile(r"toevoegen aan (winkel)?(wagen|mandje)|in (de )?winkelwagen|add to (cart|basket)|nu kopen|buy now|bestel", re.I)
 
 
 def notify(title, msg, url=None):
@@ -21,7 +21,7 @@ def notify(title, msg, url=None):
 
 
 def check(page, url):
-    """True = beschikbaar, False = niet beschikbaar, None = onbekend (pagina niet goed geladen)."""
+    """Geeft (beschikbaar, set met knoppen) of None als de pagina niet goed laadde."""
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(8000)
     buttons = page.evaluate(
@@ -33,7 +33,9 @@ def check(page, url):
     print("  knoppen:", [(b["t"], b["d"]) for b in buttons if b["t"]])
     if not buttons:
         return None
-    return any(ADD_RE.search(b["t"]) and not b["d"] for b in buttons)
+    available = any(ADD_RE.search(b["t"]) and not b["d"] for b in buttons)
+    keys = {f"{b['t']}|{'uit' if b['d'] else 'aan'}" for b in buttons if b["t"]}
+    return available, keys
 
 
 def main():
@@ -52,24 +54,44 @@ def main():
         )
         page = ctx.new_page()
         for prod in PRODUCTS:
-            print(prod["name"])
+            name, url = prod["name"], prod["url"]
+            print(name)
             try:
-                status = check(page, prod["url"])
+                res = check(page, url)
             except Exception as e:
                 print("  fout:", e)
-                status = None
-            print("  beschikbaar:", status)
-            if status is None:
+                res = None
+            if res is None:
                 unknown += 1
                 continue
-            if status and not state.get(prod["url"]):
-                notify(f"{prod['name']} is beschikbaar!", "Snel kopen bij PlayStation Direct.", prod["url"])
-            state[prod["url"]] = status
+            available, keys = res
+            print("  beschikbaar:", available)
+
+            old = state.get(url)
+            if isinstance(old, bool):
+                old = {"available": old, "seen": None}
+            if old is None:
+                old = {"available": False, "seen": None}
+
+            just_available = available and not old["available"]
+            if just_available:
+                notify(f"{name} is beschikbaar!", "Snel kopen bij PlayStation Direct.", url)
+
+            seen = old["seen"]
+            if seen is not None:
+                new = sorted(keys - set(seen))
+                if new and not just_available:
+                    notify(f"Let op: {name} is veranderd",
+                           "Nieuwe knop: " + ", ".join(new)[:200] + ". Check de pagina!", url)
+                seen_all = set(seen) | keys
+            else:
+                seen_all = keys
+            state[url] = {"available": available, "seen": sorted(seen_all)}
         browser.close()
 
     json.dump(state, open(STATE_FILE, "w"), indent=2)
     if unknown:
-        sys.exit(1)  # run wordt rood in GitHub, zodat je het merkt
+        sys.exit(1)
 
 
 main()
